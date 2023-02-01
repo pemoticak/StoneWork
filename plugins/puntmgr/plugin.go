@@ -101,8 +101,9 @@ type PuntManagerNamingAPI interface {
 }
 
 // InterconnectLink is one of the:
-//  - AF-UNIX socket
-//  - pair of interfaces (memif or TAP)
+//   - AF-UNIX socket
+//   - pair of interfaces (memif or TAP)
+//
 // and each type has type-specific parameters.
 type InterconnectLink interface {
 	isInterconnectLink()
@@ -416,45 +417,36 @@ func (p *Plugin) AddPunt(cnfMsLabel, key string, puntReq *pb.PuntRequest) error 
 		}
 	}
 
-	// configure punt asynchronously
-	go func() {
+	puntState = pb.PuntState_CREATED
+	if cnfMode == cnfreg.CnfMode_STONEWORK {
+		p.sendTxnsAsync(localTxn, remoteTxn)
+		_, err = remoteCnfClient.UpdatePuntState(context.Background(),
+			&pb.UpdatePuntStateReq{
+				Metadata: puntMeta,
+				State:    puntState,
+			})
+		if err != nil {
+			// ignore any errors at this point
+			p.Log.Error(err)
+			err = nil
+		}
+	} else {
 		// ignore errors - they may get fixed by retrying
 		if err = localTxn.Send(context.Background()); err != nil {
 			p.Log.Error(err)
 		}
-		if cnfMode == cnfreg.CnfMode_STONEWORK {
-			if err = remoteTxn.Send(context.Background()); err != nil {
-				p.Log.Error(err)
-			}
-		}
+	}
 
-		puntState = pb.PuntState_CREATED
-		if cnfMode == cnfreg.CnfMode_STONEWORK {
-			_, err = remoteCnfClient.UpdatePuntState(context.Background(),
-				&pb.UpdatePuntStateReq{
-					Metadata: puntMeta,
-					State:    puntState,
-				})
-			if err != nil {
-				// ignore any errors at this point
-				p.Log.Error(err)
-				err = nil
-			}
-		}
+	// publish notification about newly configured punt
+	p.notifDescr.notify(id, false)
 
-		// publish notification about newly configured punt
-		p.notifDescr.notify(id, false)
-
-		p.Lock()
-		defer p.Unlock()
-		punt, exists := p.punts[id]
-		if !exists {
-			// highly unlikely
-			p.Log.Warnf("punt removed before it was fully configured")
-			return
-		}
-		punt.state = puntState
-	}()
+	punt, exists := p.punts[id]
+	if !exists {
+		// highly unlikely
+		p.Log.Warnf("punt removed before it was fully configured")
+		return nil
+	}
+	punt.state = puntState
 	return nil
 }
 
@@ -528,37 +520,27 @@ func (p *Plugin) DelPunt(cnfMsLabel, key, label string) error {
 
 	// remove metadata from memory
 	delete(p.punts, id)
-	puntState := pb.PuntState_DELETED
 
-	// send announcement about deleted packet punting into CNF
 	if cnfMode == cnfreg.CnfMode_STONEWORK {
+		p.sendTxnsAsync(localTxn, remoteTxn)
 		_, err = remoteCnfClient.UpdatePuntState(context.Background(),
 			&pb.UpdatePuntStateReq{
 				Metadata: puntMeta,
-				State:    puntState,
+				State:    pb.PuntState_DELETED,
 			})
 		if err != nil {
 			// ignore any errors at this point
 			p.Log.Error(err)
-			err = nil
 		}
-	}
-
-	// publish notification already before the punt is removed
-	go p.notifDescr.notify(id, true)
-
-	// un-configure punt asynchronously
-	go func() {
+	} else {
 		// ignore errors - they may get fixed by retrying
-		if cnfMode == cnfreg.CnfMode_STONEWORK {
-			if err = remoteTxn.Send(context.Background()); err != nil {
-				p.Log.Error(err)
-			}
-		}
 		if err = localTxn.Send(context.Background()); err != nil {
 			p.Log.Error(err)
 		}
-	}()
+	}
+
+	// publish notification about removed punt
+	p.notifDescr.notify(id, true)
 	return nil
 }
 
@@ -634,6 +616,21 @@ func (p *Plugin) UpdatePuntState(_ context.Context, req *pb.UpdatePuntStateReq) 
 		delete(p.punts, id)
 	}
 	return resp, nil
+}
+
+func (p *Plugin) sendTxnsAsync(txns ...client.ChangeRequest) {
+	// only log errors, they may get fixed by retrying
+	var wg sync.WaitGroup
+	for _, txn := range txns {
+		wg.Add(1)
+		go func(txn client.ChangeRequest) {
+			defer wg.Done()
+			if err := txn.Send(context.Background()); err != nil {
+				p.Log.Error(err)
+			}
+		}(txn)
+	}
+	wg.Wait()
 }
 
 func puntIdFromProto(puntMeta *pb.PuntMetadata) puntID {
