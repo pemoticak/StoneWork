@@ -76,6 +76,7 @@ func findProtoFiles(dir string) []string {
 		logging.DefaultLogger.Errorf("error when searching for proto files: %w", err)
 		return nil
 	}
+	logging.DefaultLogger.Warnf("found files: %v", files)
 	return files
 }
 
@@ -99,6 +100,8 @@ func extractMessageOptions(files linker.Files) map[protowire.Number]protoreflect
 			fieldNum := exts.Get(i).Number()
 			extTypeDesc := f.FindExtensionByNumber(optsMsgName, fieldNum)
 			if extTypeDesc != nil {
+				logging.DefaultLogger.Warnf("found extension desc: %v with number: %v", extTypeDesc, fieldNum)
+				logging.DefaultLogger.Warnf("found extension desc type: %v with number: %v", extTypeDesc.Type(), fieldNum)
 				result[fieldNum] = extTypeDesc
 			}
 		}
@@ -112,6 +115,8 @@ func registerModels(files linker.Files, specExtDesc, tmplExtDesc protoreflect.Ex
 		for i := 0; i < msgs.Len(); i++ {
 			msgDesc := msgs.Get(i)
 			opts := msgDesc.Options().(*descriptorpb.MessageOptions)
+			logging.DefaultLogger.Warnf("handling msg desc: %v with options: %v", msgDesc, opts)
+			logging.DefaultLogger.Warnf("handling msg desc: %v with options: %v", msgDesc, opts)
 			dynSpec, ok := proto.GetExtension(opts, specExtDesc.Type()).(*dynamicpb.Message)
 			if !ok {
 				// no spec detected, continue with next message
